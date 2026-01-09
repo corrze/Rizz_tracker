@@ -5,19 +5,22 @@ A computer vision project that tracks people's movement and fashion using your w
 ## Features
 
 - 🎥 Real-time webcam tracking
-- 👤 Human pose detection using MediaPipe
-- 👔 Fashion/clothing detection using YOLO
-- 📊 Dynamic "rizz" score calculation based on:
-  - **Movement** (30%): Smooth, confident movements increase score
-  - **Posture** (40%): Good posture (shoulders level, head up) boosts rizz
-  - **Fashion** (30%): Detected clothing and accessories contribute to score
-- 🎨 Visual rizz meter with color-coded feedback (red → orange → green)
+- 👤 Full-body pose detection using MediaPipe Tasks Pose Landmarker
+- 👔 Fashion/accessory detection using YOLO
+- 💇 Hair / head framing awareness (keeps your hair in frame for more rizz)
+- 📊 Dynamic "rizz" score calculation, with **forgiving but pose-focused scoring**:
+  - **Posture** (~40%): Tall stance, level shoulders, head clearly above shoulders
+  - **Pose / Style** (~40%): Clean head tilt + visible hair/top of head, works for front or sideways poses
+  - **Movement** (~10%): A bit of smooth motion helps; not the main factor
+  - **Fashion** (~10%): Detected accessories (bag, hat, etc.) add extra rizz
+- 💬 Live **tips box** on the left that tells you what to change to raise your rizz (toggleable)
+- 🎨 Visual rizz meter above your head with color-coded feedback (red → orange → green)
 
 ## Installation
 
 1. **Clone or navigate to the project directory:**
    ```bash
-   cd (into the directory root(
+   git clone https://github.com/corrze/Rizz_tracker/tree/main
    ```
 
 2. **Create a virtual environment (recommended):**
@@ -42,24 +45,28 @@ python rizz_tracker.py
 
 ### Controls
 - **'q' key**: Quit the application
-- The camera feed will show a mirror effect (horizontally flipped)
+- **'v' key**: Toggle pose visualization (skeleton + landmarks)
+- **'t' key**: Toggle the tips box (advice on how to raise rizz)
+- The camera feed shows a mirror effect (horizontally flipped)
 
 ### Tips for Higher Rizz Score
 
-1. **Posture**: Stand up straight with shoulders level and head up
-2. **Movement**: Make smooth, confident movements (not too fast, not too slow)
-3. **Fashion**: Wear visible clothing/accessories that the system can detect
-4. **Consistency**: Maintain good posture and movement over time
+1. **Posture**: Stand tall with shoulders level and head clearly above your shoulders
+2. **Pose / Style**: Hold a strong pose; keep your head tilt intentional, not slouched
+3. **Hair Framing**: Adjust the camera so the top of your head and hair are fully in frame
+4. **Movement**: Add a bit of smooth, controlled motion instead of jittery movements
+5. **Fashion**: Bring visible accessories (hat, bag, etc.) into frame for extra style points
 
 ## How It Works
 
-1. **Pose Detection**: MediaPipe Pose detects 33 body landmarks in real-time
-2. **Head Tracking**: The system locates your head position using nose/eye landmarks
-3. **Movement Analysis**: Tracks changes in key body points over time frames
-4. **Posture Analysis**: Evaluates shoulder alignment and head position
-5. **Fashion Detection**: YOLO model detects person and accessories (runs every 5th frame for performance)
-6. **Rizz Calculation**: Combines all factors with weighted scoring to produce 0-100 rizz score
-7. **Visual Display**: Dynamic meter above head shows current rizz level with color coding
+1. **Pose Detection**: MediaPipe Tasks Pose Landmarker detects 33+ body landmarks in real-time
+2. **Head & Hair Tracking**: Uses nose/eyes to estimate the top of your head and hair position
+3. **Movement Analysis**: Compares key joints (shoulders, hips, wrists, ankles) over time
+4. **Posture Analysis**: Evaluates shoulder alignment and how high your head sits above your shoulders
+5. **Pose / Style Analysis**: Scores head tilt, pose stability, and hair visibility (works for sideways poses)
+6. **Fashion Detection**: YOLO detects person + accessories every 5th frame for performance
+7. **Rizz Calculation**: Combines movement (~10%), posture (~40%), style (~40%), fashion (~10%), then slightly eases scores toward the high-mid range to be more forgiving
+8. **Visual Display**: A rizz meter is drawn above your head, plus optional pose skeleton and tips box
 
 ## Customization
 

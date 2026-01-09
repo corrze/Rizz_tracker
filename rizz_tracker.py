@@ -61,6 +61,7 @@ class RizzTracker:
         self.last_posture_score = 0.0
         self.last_style_score = 0.0
         self.last_fashion_score = 0.0
+        self.last_hair_score = 0.0
         
         # Pose landmark indices (MediaPipe Pose has 33 landmarks)
         # Mapping to match the old API structure
@@ -170,68 +171,82 @@ class RizzTracker:
     def calculate_movement_score(self, current_landmarks):
         """
         Calculate movement score based on pose changes over time.
-        More strict scoring: low movement = low score, high movement = high score.
-        
-        Args:
-            current_landmarks: Current pose landmarks (list from Tasks API)
-            
-        Returns:
-            Movement score (0-100)
+        More strict on actual movement, but forgiving when only part of the body
+        is visible (e.g., just upper body in frame).
         """
         if not current_landmarks or len(current_landmarks) == 0:
-            return 20.0  # Low baseline for no movement
-            
+            return 30.0  # neutral-ish
+
         if len(self.pose_history) < 5:
             self.pose_history.append(current_landmarks)
-            return 20.0  # Low baseline when starting
-        
-        # Calculate average movement of key points
-        previous_landmarks = self.pose_history[-5]  # Compare to 5 frames ago
+            return 30.0  # neutral while bootstrapping
+
+        previous_landmarks = self.pose_history[-5]
+        if not previous_landmarks:
+            self.pose_history.append(current_landmarks)
+            return 30.0
+
         total_movement = 0.0
         point_count = 0
-        
-        key_point_indices = [
+
+        # Group joints by region so we can handle partial visibility
+        upper_body_points = [
             self.LEFT_SHOULDER, self.RIGHT_SHOULDER,
-            self.LEFT_HIP, self.RIGHT_HIP,
-            self.LEFT_ANKLE, self.RIGHT_ANKLE,
             self.LEFT_WRIST, self.RIGHT_WRIST,
         ]
-        
-        for idx in key_point_indices:
-            curr_landmark = self.get_landmark(current_landmarks, idx)
-            prev_landmark = self.get_landmark(previous_landmarks, idx)
-            
-            if curr_landmark and prev_landmark:
-                # Tasks API format: landmark has x, y, z, visibility
-                if (hasattr(curr_landmark, 'visibility') and hasattr(prev_landmark, 'visibility') and
-                    curr_landmark.visibility > 0.5 and prev_landmark.visibility > 0.5):
-                    
-                    curr_x = curr_landmark.x
-                    curr_y = curr_landmark.y
-                    prev_x = prev_landmark.x
-                    prev_y = prev_landmark.y
-                    
-                    movement = np.sqrt((curr_x - prev_x)**2 + (curr_y - prev_y)**2)
-                    total_movement += movement
-                    point_count += 1
-        
-        if point_count == 0:
-            movement_score = 20.0  # Low baseline
-        else:
-            avg_movement = total_movement / point_count
-            # More strict scaling: need significant movement to get high scores
-            # Very small movements (< 0.005) = 20-40 score
-            # Medium movements (0.005-0.02) = 40-70 score  
-            # Large movements (> 0.02) = 70-100 score
+        lower_body_points = [
+            self.LEFT_HIP, self.RIGHT_HIP,
+            self.LEFT_ANKLE, self.RIGHT_ANKLE,
+        ]
+
+        def accumulate_movement(indices):
+            nonlocal total_movement, point_count
+            for idx in indices:
+                curr_landmark = self.get_landmark(current_landmarks, idx)
+                prev_landmark = self.get_landmark(previous_landmarks, idx)
+                if curr_landmark and prev_landmark:
+                    if (hasattr(curr_landmark, "visibility")
+                        and hasattr(prev_landmark, "visibility")
+                        and curr_landmark.visibility > 0.5
+                        and prev_landmark.visibility > 0.5):
+                        curr_x, curr_y = curr_landmark.x, curr_landmark.y
+                        prev_x, prev_y = prev_landmark.x, prev_landmark.y
+                        movement = np.sqrt((curr_x - prev_x) ** 2 + (curr_y - prev_y) ** 2)
+                        total_movement += movement
+                        point_count += 1
+
+        # Always try to use upper body; include lower body only if visible
+        accumulate_movement(upper_body_points)
+        upper_count = point_count
+        accumulate_movement(lower_body_points)
+        lower_count = point_count - upper_count
+
+        if upper_count == 0 and lower_count == 0:
+            # Can't see anything moving clearly → neutral
+            movement_score = 30.0
+        elif upper_count > 0 and lower_count == 0:
+            # Only upper body visible: base movement on what we see
+            avg_movement = total_movement / upper_count
             if avg_movement < 0.002:
-                movement_score = 20.0  # Almost no movement
+                movement_score = 30.0
             elif avg_movement < 0.005:
-                movement_score = 20 + (avg_movement / 0.005) * 20  # 20-40
+                movement_score = 30.0 + (avg_movement / 0.005) * 20.0    # 30–50
             elif avg_movement < 0.02:
-                movement_score = 40 + ((avg_movement - 0.005) / 0.015) * 30  # 40-70
+                movement_score = 50.0 + ((avg_movement - 0.005) / 0.015) * 30.0  # 50–80
             else:
-                movement_score = min(100, 70 + ((avg_movement - 0.02) / 0.03) * 30)  # 70-100
-        
+                movement_score = min(100.0, 80.0 + ((avg_movement - 0.02) / 0.03) * 20.0)
+        else:
+            # Both upper and lower body visible: full-body movement
+            avg_movement = total_movement / point_count
+            if avg_movement < 0.002:
+                movement_score = 30.0
+            elif avg_movement < 0.005:
+                movement_score = 30.0 + (avg_movement / 0.005) * 20.0    # 30–50
+            elif avg_movement < 0.02:
+                movement_score = 50.0 + ((avg_movement - 0.005) / 0.015) * 30.0  # 50–80
+            else:
+                movement_score = min(100.0, 80.0 + ((avg_movement - 0.02) / 0.03) * 20.0)
+
         self.pose_history.append(current_landmarks)
         return movement_score
     
@@ -289,14 +304,40 @@ class RizzTracker:
         
         return posture_score
     
+    def calculate_hair_visibility_score(self, landmarks):
+        """
+        Estimate how well the hair / top of head is visible in the frame.
+        Uses the top-of-head estimate from get_head_position (normalized coords).
+        """
+        head_pos = self.get_head_position(landmarks)
+        if not head_pos:
+            return 50.0  # neutral
+
+        top_y = head_pos[1]  # 0 = top of frame, 1 = bottom; can be < 0 if cropped
+
+        # If the top of the head is far above the frame, hair is likely cropped
+        if top_y < -0.05:
+            return 20.0
+        elif top_y < 0.0:
+            return 40.0  # slightly cropped
+        elif top_y < 0.05:
+            return 70.0  # close to top, mostly visible
+        elif top_y < 0.20:
+            return 100.0  # nicely framed inside
+        elif top_y < 0.35:
+            return 80.0   # head lower but hair still visible
+        else:
+            return 60.0   # camera probably too zoomed out / head too low
+
     def calculate_pose_style_score(self, landmarks):
         """
-        Pose / face style score (0-100).
-        Focuses on head alignment, centering, and stillness (holding a pose),
-        not big body movement.
+        Pose / style score (0-100).
+        Focuses on head alignment and hair visibility, with a small contribution
+        from stillness. It does NOT require facing the camera or centering your face,
+        so sideways or 3/4 poses can still have high rizz.
         """
         if not landmarks or len(landmarks) == 0:
-            return 40.0
+            return 50.0
 
         # Use head landmarks
         nose = self.get_landmark(landmarks, self.NOSE)
@@ -304,9 +345,9 @@ class RizzTracker:
         right_eye = self.get_landmark(landmarks, self.RIGHT_EYE)
 
         if not nose or not left_eye or not right_eye:
-            return 40.0
+            return 50.0
 
-        # 1) Head tilt (based on eye line angle)
+        # 1) Head tilt (based on eye line angle) – works for front or sideways poses
         dx = right_eye.x - left_eye.x
         dy = right_eye.y - left_eye.y
         if abs(dx) < 1e-6:
@@ -314,7 +355,7 @@ class RizzTracker:
         angle_rad = np.arctan2(dy, dx)
         angle_deg = abs(angle_rad * 180.0 / np.pi)
 
-        # Small tilt (0–10 deg) = best, 10–25 deg = okay, >25 deg = worse
+        # Small tilt (0–10 deg) = best, 10–25 deg = okay, >25 deg = more stylized but lower score
         if angle_deg <= 10:
             tilt_score = 100.0
         elif angle_deg <= 25:
@@ -323,16 +364,7 @@ class RizzTracker:
             extra = min(35.0, angle_deg - 25.0)
             tilt_score = max(0.0, 60.0 - (extra / 35.0) * 60.0)    # 0–60
 
-        # 2) Face centering (nose near center horizontally)
-        offset_from_center = abs(nose.x - 0.5)
-        if offset_from_center <= 0.15:
-            center_score = 100.0 - (offset_from_center / 0.15) * 30.0  # 70–100
-        elif offset_from_center <= 0.30:
-            center_score = 70.0 - ((offset_from_center - 0.15) / 0.15) * 30.0  # 40–70
-        else:
-            center_score = 40.0
-
-        # 3) Head stillness (holding a pose)
+        # 2) Head stillness – small, forgiving factor
         pose_history = list(self.pose_history)
         if len(pose_history) >= 5:
             old_landmarks = pose_history[-5]
@@ -342,21 +374,25 @@ class RizzTracker:
 
         if old_nose:
             dist = np.sqrt((nose.x - old_nose.x) ** 2 + (nose.y - old_nose.y) ** 2)
-            if dist < 0.002:
-                stillness_score = 100.0
-            elif dist < 0.008:
-                stillness_score = 70.0 + (1 - (dist - 0.002) / 0.006) * 30.0  # 70–100
+            # Be forgiving to avoid punishing jittery landmarks
+            if dist < 0.01:
+                stillness_score = 90.0
             elif dist < 0.03:
-                stillness_score = 30.0 + (1 - (dist - 0.008) / 0.022) * 40.0  # 30–70
+                stillness_score = 70.0
             else:
-                stillness_score = 0.0
+                stillness_score = 50.0
         else:
-            stillness_score = 60.0
+            stillness_score = 80.0
 
+        # 3) Hair visibility
+        hair_score = self.calculate_hair_visibility_score(landmarks)
+        self.last_hair_score = hair_score
+        
+        # Heavier weights on tilt & hair; stillness is minor
         style_score = (
-            tilt_score * 0.4 +
-            center_score * 0.3 +
-            stillness_score * 0.3
+            tilt_score      * 0.55 +   # 55%
+            hair_score      * 0.25 +   # 25%
+            stillness_score * 0.20     # 20%
         )
 
         return style_score
@@ -418,10 +454,11 @@ class RizzTracker:
         Generate short tips on how to raise the rizz meter based on sub-scores.
         """
         tips = []
+        hair_score = getattr(self, "last_hair_score", 0.0)
 
-        # Style / pose tips
+        # Style / pose tips (no forced smile or face centering)
         if style_score < 60:
-            tips.append("Hold a steady pose facing the camera")
+            tips.append("Hold a strong pose with a clean head tilt")
         if posture_score < 60:
             tips.append("Stand taller with level shoulders")
 
@@ -434,6 +471,10 @@ class RizzTracker:
         # Fashion tips
         if fashion_score < 40:
             tips.append("Show an accessory (hat, bag, etc.)")
+
+        # Hair framing tips
+        if hair_score < 60:
+            tips.append("Tilt camera up so your hair is in frame")
 
         if not tips:
             tips.append("Maintain your pose, you're cooking")
@@ -500,14 +541,18 @@ class RizzTracker:
         self.last_fashion_score = fashion_score
 
         # New weighted combination
-        # Movement: 10%, Posture: 40%, Style (pose/face): 40%, Fashion: 10%
+        # Movement: 5%, Posture: 40%, Style (pose/face + hair): 45%, Fashion: 10%
         rizz = (
-            movement_score * 0.10 +
+            movement_score * 0.05 +
             posture_score * 0.40 +
-            style_score   * 0.40 +
+            style_score   * 0.45 +
             fashion_score * 0.10
         )
-        
+
+        # Make scoring slightly more forgiving so decent poses land higher
+        # Pull scores gently toward the high-mid range
+        rizz = rizz * 0.9 + 10
+
         # Clamp to 0-100
         rizz = max(0, min(100, rizz))
         
