@@ -56,6 +56,11 @@ class RizzTracker:
         self.clothing_detections = deque(maxlen=60)  # Track clothing over time
         self.rizz_score = 0.0
         self.rizz_history = deque(maxlen=10)
+        # Last sub-scores (for tips / debug)
+        self.last_movement_score = 0.0
+        self.last_posture_score = 0.0
+        self.last_style_score = 0.0
+        self.last_fashion_score = 0.0
         
         # Pose landmark indices (MediaPipe Pose has 33 landmarks)
         # Mapping to match the old API structure
@@ -92,6 +97,8 @@ class RizzTracker:
         
         # Visualization toggle
         self.show_pose_visualization = False
+        # Tips box toggle
+        self.show_tips_box = True
         
         # Movement thresholds
         self.movement_threshold = 0.02
@@ -282,6 +289,78 @@ class RizzTracker:
         
         return posture_score
     
+    def calculate_pose_style_score(self, landmarks):
+        """
+        Pose / face style score (0-100).
+        Focuses on head alignment, centering, and stillness (holding a pose),
+        not big body movement.
+        """
+        if not landmarks or len(landmarks) == 0:
+            return 40.0
+
+        # Use head landmarks
+        nose = self.get_landmark(landmarks, self.NOSE)
+        left_eye = self.get_landmark(landmarks, self.LEFT_EYE)
+        right_eye = self.get_landmark(landmarks, self.RIGHT_EYE)
+
+        if not nose or not left_eye or not right_eye:
+            return 40.0
+
+        # 1) Head tilt (based on eye line angle)
+        dx = right_eye.x - left_eye.x
+        dy = right_eye.y - left_eye.y
+        if abs(dx) < 1e-6:
+            dx = 1e-6
+        angle_rad = np.arctan2(dy, dx)
+        angle_deg = abs(angle_rad * 180.0 / np.pi)
+
+        # Small tilt (0–10 deg) = best, 10–25 deg = okay, >25 deg = worse
+        if angle_deg <= 10:
+            tilt_score = 100.0
+        elif angle_deg <= 25:
+            tilt_score = 100.0 - ((angle_deg - 10) / 15.0) * 40.0  # 60–100
+        else:
+            extra = min(35.0, angle_deg - 25.0)
+            tilt_score = max(0.0, 60.0 - (extra / 35.0) * 60.0)    # 0–60
+
+        # 2) Face centering (nose near center horizontally)
+        offset_from_center = abs(nose.x - 0.5)
+        if offset_from_center <= 0.15:
+            center_score = 100.0 - (offset_from_center / 0.15) * 30.0  # 70–100
+        elif offset_from_center <= 0.30:
+            center_score = 70.0 - ((offset_from_center - 0.15) / 0.15) * 30.0  # 40–70
+        else:
+            center_score = 40.0
+
+        # 3) Head stillness (holding a pose)
+        pose_history = list(self.pose_history)
+        if len(pose_history) >= 5:
+            old_landmarks = pose_history[-5]
+            old_nose = self.get_landmark(old_landmarks, self.NOSE) if old_landmarks else None
+        else:
+            old_nose = None
+
+        if old_nose:
+            dist = np.sqrt((nose.x - old_nose.x) ** 2 + (nose.y - old_nose.y) ** 2)
+            if dist < 0.002:
+                stillness_score = 100.0
+            elif dist < 0.008:
+                stillness_score = 70.0 + (1 - (dist - 0.002) / 0.006) * 30.0  # 70–100
+            elif dist < 0.03:
+                stillness_score = 30.0 + (1 - (dist - 0.008) / 0.022) * 40.0  # 30–70
+            else:
+                stillness_score = 0.0
+        else:
+            stillness_score = 60.0
+
+        style_score = (
+            tilt_score * 0.4 +
+            center_score * 0.3 +
+            stillness_score * 0.3
+        )
+
+        return style_score
+
     def calculate_fashion_score(self, detections):
         """
         Calculate fashion score based on detected clothing/accessories.
@@ -334,6 +413,70 @@ class RizzTracker:
         
         return fashion_score
     
+    def get_rizz_tips(self, movement_score, posture_score, style_score, fashion_score):
+        """
+        Generate short tips on how to raise the rizz meter based on sub-scores.
+        """
+        tips = []
+
+        # Style / pose tips
+        if style_score < 60:
+            tips.append("Hold a steady pose facing the camera")
+        if posture_score < 60:
+            tips.append("Stand taller with level shoulders")
+
+        # Movement tips (small influence)
+        if movement_score < 40:
+            tips.append("Add a bit of smooth motion")
+        elif movement_score > 80:
+            tips.append("Move less erratically")
+
+        # Fashion tips
+        if fashion_score < 40:
+            tips.append("Show an accessory (hat, bag, etc.)")
+
+        if not tips:
+            tips.append("Maintain your pose, you're cooking")
+
+        return tips[:3]
+
+    def draw_rizz_tips_box(self, frame, tips):
+        """
+        Draw a small box with tips on how to raise rizz.
+        """
+        if not tips or not self.show_tips_box:
+            return
+
+        h, w = frame.shape[:2]
+        x, y = 10, 60  # top-left corner of box
+        padding = 8
+        line_height = 20
+
+        lines = ["Tips to raise rizz:"] + [f"- {t}" for t in tips]
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 1
+
+        max_width = 0
+        for line in lines:
+            (tw, th), _ = cv2.getTextSize(line, font, font_scale, thickness)
+            max_width = max(max_width, tw)
+
+        box_height = padding * 2 + line_height * len(lines)
+        box_width = padding * 2 + max_width
+
+        # Background
+        cv2.rectangle(frame, (x, y), (x + box_width, y + box_height), (0, 0, 0), -1)
+        cv2.rectangle(frame, (x, y), (x + box_width, y + box_height), (255, 255, 255), 1)
+
+        # Text
+        ty = y + padding + 15
+        for i, line in enumerate(lines):
+            color = (0, 255, 255) if i == 0 else (255, 255, 255)
+            cv2.putText(frame, line, (x + padding, ty + i * line_height),
+                        font, font_scale, color, thickness, cv2.LINE_AA)
+
     def calculate_rizz_score(self, landmarks, detections):
         """
         Calculate overall rizz score combining movement, posture, and fashion.
@@ -347,15 +490,23 @@ class RizzTracker:
         """
         movement_score = self.calculate_movement_score(landmarks)
         posture_score = self.calculate_posture_score(landmarks)
+        style_score = self.calculate_pose_style_score(landmarks)
         fashion_score = self.calculate_fashion_score(detections)
-        
-        # Weighted combination
-        # Movement: 30%, Posture: 40%, Fashion: 30%
-        rizz = (movement_score * 0.3 + posture_score * 0.4 + fashion_score * 0.3)
-        
-        # Add dynamic bonus for smooth movements (high but not too high movement)
-        if 40 < movement_score < 70:
-            rizz += 5  # Bonus for confident but not erratic movement
+
+        # Store for tips/debug
+        self.last_movement_score = movement_score
+        self.last_posture_score = posture_score
+        self.last_style_score = style_score
+        self.last_fashion_score = fashion_score
+
+        # New weighted combination
+        # Movement: 10%, Posture: 40%, Style (pose/face): 40%, Fashion: 10%
+        rizz = (
+            movement_score * 0.10 +
+            posture_score * 0.40 +
+            style_score   * 0.40 +
+            fashion_score * 0.10
+        )
         
         # Clamp to 0-100
         rizz = max(0, min(100, rizz))
@@ -558,6 +709,7 @@ class RizzTracker:
         print("Controls:")
         print("  'q' - Quit")
         print("  'v' - Toggle pose visualization (landmarks/skeleton)")
+        print("  't' - Toggle tips box")
         print("="*60 + "\n")
         
         fps_counter = 0
@@ -617,6 +769,17 @@ class RizzTracker:
                 cv2.putText(frame, "No person detected", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
             
+            # Generate tips based on latest sub-scores
+            tips = self.get_rizz_tips(
+                self.last_movement_score,
+                self.last_posture_score,
+                self.last_style_score,
+                self.last_fashion_score,
+            )
+
+            # Draw tips box (left side)
+            self.draw_rizz_tips_box(frame, tips)
+
             # Display FPS and controls
             fps_counter += 1
             if fps_counter % 30 == 0:
@@ -629,7 +792,7 @@ class RizzTracker:
             cv2.putText(frame, f"FPS: {fps_display:.1f}", (10, h - 40),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
-            # Show visualization toggle status
+            # Show visualization/tips toggle status
             viz_status = "ON" if self.show_pose_visualization else "OFF"
             cv2.putText(frame, f"Pose Viz: {viz_status} (Press 'v')", (10, h - 20),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
@@ -644,6 +807,9 @@ class RizzTracker:
             elif key == ord('v'):
                 self.show_pose_visualization = not self.show_pose_visualization
                 print(f"Pose visualization: {'ON' if self.show_pose_visualization else 'OFF'}")
+            elif key == ord('t'):
+                self.show_tips_box = not self.show_tips_box
+                print(f"Tips box: {'ON' if self.show_tips_box else 'OFF'}")
         
         # Cleanup
         self.cap.release()
