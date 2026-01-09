@@ -17,7 +17,7 @@ A computer vision project that tracks people's movement and fashion using your w
 
 1. **Clone or navigate to the project directory:**
    ```bash
-   cd /Users/khoavo/Documents/Rizz
+   cd (into the directory root(
    ```
 
 2. **Create a virtual environment (recommended):**
